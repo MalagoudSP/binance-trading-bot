@@ -7,6 +7,9 @@ from typing import Dict, Any, Optional
 from .config import Config
 from .logger import logger
 from .orders import OrderValidator, OrderSide, OrderType
+from .order_history import OrderHistoryManager
+from .analytics import PortfolioAnalytics
+from .error_handling import retry, recovery_manager
 
 # Main bot class for handling Binance Futures trading
 
@@ -16,7 +19,7 @@ class BasicBot:
     Simplified trading bot for Binance Futures Testnet
     
     Supports market, limit, and stop-limit orders with comprehensive
-    logging and error handling.
+    logging, error handling, order history tracking, and analytics.
     """
     
     def __init__(self, api_key: str, api_secret: str, testnet: bool = True):
@@ -31,6 +34,10 @@ class BasicBot:
         self.api_key = api_key
         self.api_secret = api_secret
         self.testnet = testnet
+        
+        # Initialize new features
+        self.order_history = OrderHistoryManager()
+        self.portfolio = PortfolioAnalytics()
         
         try:
             logger.info("Initializing Binance client...")
@@ -55,11 +62,14 @@ class BasicBot:
             
         except BinanceAPIException as e:
             logger.error(f"Binance API Error during initialization: {e}")
+            recovery_manager.log_error("api_init_error")
             raise
         except Exception as e:
             logger.error(f"Error initializing bot: {e}")
+            recovery_manager.log_error("bot_init_error")
             raise
     
+    @retry(max_retries=3, backoff_factor=2.0)
     def place_market_order(
         self,
         symbol: str,
@@ -93,6 +103,15 @@ class BasicBot:
                 quantity=quantity
             )
             
+            # Track in history and analytics
+            self.order_history.add_order(order)
+            self.portfolio.add_trade(
+                symbol=symbol,
+                side=side,
+                quantity=float(order.get('executedQty', quantity)),
+                entry_price=float(order.get('avgPrice', 0))
+            )
+            
             logger.info(f"✓ Market order placed successfully")
             logger.info(f"Order ID: {order['orderId']}, Status: {order['status']}")
             logger.debug(f"Full order response: {order}")
@@ -102,11 +121,14 @@ class BasicBot:
         except BinanceAPIException as e:
             logger.error(f"Binance API Error: {e}")
             logger.error(f"Error code: {e.code}, Message: {e.message}")
+            recovery_manager.log_error(f"api_error_{e.code}")
             raise
         except Exception as e:
             logger.error(f"Error placing market order: {e}")
+            recovery_manager.log_error("market_order_error")
             raise
     
+    @retry(max_retries=3, backoff_factor=2.0)
     def place_limit_order(
         self,
         symbol: str,
@@ -147,6 +169,9 @@ class BasicBot:
                 timeInForce=time_in_force
             )
             
+            # Track in history (executed price may be 0 for pending orders)
+            self.order_history.add_order(order)
+            
             logger.info(f"✓ Limit order placed successfully")
             logger.info(f"Order ID: {order['orderId']}, Status: {order['status']}")
             logger.debug(f"Full order response: {order}")
@@ -161,6 +186,7 @@ class BasicBot:
             logger.error(f"Error placing limit order: {e}")
             raise
     
+    @retry(max_retries=3)
     def place_stop_limit_order(
         self,
         symbol: str,
@@ -207,6 +233,9 @@ class BasicBot:
                 stopPrice=stop_price,
                 timeInForce=time_in_force
             )
+            
+            # Track in history
+            self.order_history.add_order(order)
             
             logger.info(f"✓ Stop-limit order placed successfully")
             logger.info(f"Order ID: {order['orderId']}, Status: {order['status']}")
